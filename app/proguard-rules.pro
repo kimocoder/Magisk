@@ -16,35 +16,40 @@
 #   public *;
 #}
 
+# Kotlin
+-assumenosideeffects class kotlin.jvm.internal.Intrinsics {
+	public static void check*(...);
+	public static void throw*(...);
+}
+
 # Snet
--keepclassmembers class com.topjohnwu.magisk.utils.ISafetyNetHelper { *; }
--keep,allowobfuscation interface com.topjohnwu.magisk.utils.ISafetyNetHelper$Callback
--keepclassmembers class * implements com.topjohnwu.magisk.utils.ISafetyNetHelper$Callback {
-  void onResponse(int);
+-keepclassmembers class com.topjohnwu.magisk.ui.safetynet.SafetyNetHelper { *; }
+-keep,allowobfuscation interface com.topjohnwu.magisk.ui.safetynet.SafetyNetHelper$Callback
+-keepclassmembers class * implements com.topjohnwu.magisk.ui.safetynet.SafetyNetHelper$Callback { *; }
+
+# Stub
+-keep class com.topjohnwu.magisk.core.App { <init>(java.lang.Object); }
+-keepclassmembers class androidx.appcompat.app.AppCompatDelegateImpl {
+  boolean mActivityHandlesUiModeChecked;
+  boolean mActivityHandlesUiMode;
 }
 
-# Keep all fragment constructors
--keepclassmembers class * extends androidx.fragment.app.Fragment {
-  public <init>(...);
-}
-
-# DelegateWorker
--keep,allowobfuscation class * extends com.topjohnwu.magisk.model.worker.DelegateWorker
-
-# BootSigner
--keepclassmembers class com.topjohnwu.signing.BootSigner { *; }
-
-# Strip logging
--assumenosideeffects class timber.log.Timber.Tree { *; }
--assumenosideeffects class com.topjohnwu.magisk.utils.Logger {
-  public *** debug(...);
+# Strip Timber verbose and debug logging
+-assumenosideeffects class timber.log.Timber$Tree {
+  public void v(**);
+  public void d(**);
 }
 
 # Excessive obfuscation
 -repackageclasses 'a'
 -allowaccessmodification
 
-# QOL
--dontnote **
--dontwarn com.caverock.androidsvg.**
--dontwarn ru.noties.markwon.**
+-dontwarn org.bouncycastle.jsse.BCSSLParameters
+-dontwarn org.bouncycastle.jsse.BCSSLSocket
+-dontwarn org.bouncycastle.jsse.provider.BouncyCastleJsseProvider
+-dontwarn org.commonmark.ext.gfm.strikethrough.Strikethrough
+-dontwarn org.conscrypt.Conscrypt*
+-dontwarn org.conscrypt.ConscryptHostnameVerifier
+-dontwarn org.openjsse.javax.net.ssl.SSLParameters
+-dontwarn org.openjsse.javax.net.ssl.SSLSocket
+-dontwarn org.openjsse.net.ssl.OpenJSSE

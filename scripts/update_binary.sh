@@ -1,38 +1,27 @@
 #!/sbin/sh
-X86_CNT=__X86_CNT__
-extract_bb() {
-  touch "$BBBIN"
-  chmod 755 "$BBBIN"
-  dd if="$0" of="$BBBIN" bs=1024 skip=$(($X86_CNT + 1))
-  "$BBBIN" >/dev/null || dd if="$0" of="$BBBIN" bs=1024 skip=1 count=$X86_CNT
-}
-setup_bb() {
-  export BBDIR=$TMPDIR/bin
-  BBBIN=$BBDIR/busybox
-  mkdir -p $BBDIR 2>/dev/null
-  extract_bb
-  $BBBIN --install -s $BBDIR
-  export PATH=$BBDIR:$PATH
-}
-case "$1" in
-  "extract"|"-x")
-    [ -z "$2" ] && BBBIN=./busybox || BBBIN="$2"
-    extract_bb
-    ;;
-  "indep"|"sh")
-    TMPDIR=.
-    setup_bb
-    shift
-    exec /system/bin/sh "$@"
-    ;;
-  *)
-    export TMPDIR=/dev/tmp
-    rm -rf $TMPDIR 2>/dev/null
-    setup_bb
-    export INSTALLER=$TMPDIR/install
-    mkdir -p $INSTALLER
-    unzip -o "$3" -d $INSTALLER >&2
-    exec sh $INSTALLER/META-INF/com/google/android/updater-script "$@"
-    ;;
-esac
-exit
+
+TMPDIR=/dev/tmp
+rm -rf $TMPDIR
+mkdir -p $TMPDIR 2>/dev/null
+
+export BBBIN=$TMPDIR/busybox
+unzip -o "$3" "lib/*/libbusybox.so" -d $TMPDIR >&2
+chmod -R 755 $TMPDIR/lib
+for arch in "x86_64" "x86" "arm64-v8a" "armeabi-v7a"; do
+  libpath="$TMPDIR/lib/$arch/libbusybox.so"
+  if [ -x $libpath ] && $libpath >/dev/null 2>&1; then
+    mv -f $libpath $BBBIN
+    break
+  fi
+done
+$BBBIN rm -rf $TMPDIR/lib
+
+export INSTALLER=$TMPDIR/install
+$BBBIN mkdir -p $INSTALLER
+$BBBIN unzip -o "$3" "assets/*" "lib/*" "META-INF/com/google/*" -x "lib/*/libbusybox.so" -d $INSTALLER >&2
+export ASH_STANDALONE=1
+if echo "$3" | $BBBIN grep -q "uninstall"; then
+  exec $BBBIN sh "$INSTALLER/assets/uninstaller.sh" "$@"
+else
+  exec $BBBIN sh "$INSTALLER/META-INF/com/google/android/updater-script" "$@"
+fi

@@ -1,76 +1,64 @@
-#include <malloc.h>
-#include <string.h>
+#include <utils.hpp>
 
-#include <utils.h>
+#include "magiskboot.hpp"
 
-#include "magiskboot.h"
+#define MATCH(p) else if (strncmp(s + skip, p, sizeof(p) - 1) == 0) skip += (sizeof(p) - 1)
 
-static int check_verity_pattern(const char *s) {
-	int skip = 0;
-	if (s[0] == ',') ++skip;
-	if (strncmp(s + skip, "verify", 6) == 0)
-		skip += 6;
-	else if (strncmp(s + skip, "avb", 3) == 0)
-		skip += 3;
-	else
-		return -1;
+static int skip_verity_pattern(const char *s) {
+    int skip = s[0] == ',';
 
-	if (s[skip] == '=') {
-		while (s[skip] != '\0' && s[skip] != ' ' && s[skip] != '\n' && s[skip] != ',') ++skip;
-	}
-	return skip;
+    if (0) {}
+    MATCH("verifyatboot");
+    MATCH("verify");
+    MATCH("avb_keys");
+    MATCH("avb");
+    MATCH("support_scfs");
+    MATCH("fsverity");
+    else return -1;
+
+    if (s[skip] == '=') {
+        while (!strchr(" \n,", s[skip]))
+            ++skip;
+    }
+    return skip;
 }
 
-static int check_encryption_pattern(const char *s) {
-	const char *encrypt_list[] = { "forceencrypt", "forcefdeorfbe", NULL };
-	for (int i = 0 ; encrypt_list[i]; ++i) {
-		int len = strlen(encrypt_list[i]);
-		if (strncmp(s, encrypt_list[i], len) == 0)
-			return len;
-	}
-	return -1;
+static int skip_encryption_pattern(const char *s) {
+    int skip = s[0] == ',';
+
+    if (0) {}
+    MATCH("forceencrypt");
+    MATCH("forcefdeorfbe");
+    MATCH("fileencryption");
+    else return -1;
+
+    if (s[skip] == '=') {
+        while (!strchr(" \n,", s[skip]))
+            ++skip;
+    }
+    return skip;
 }
 
-bool patch_verity(void **buf, uint32_t *size, bool patch) {
-	int skip, src_size = *size;
-	bool found = false;
-	char *src = (char *) *buf, *patched = patch ? (char *) xcalloc(src_size, 1) : nullptr;
-	for (int read = 0, write = 0; read < src_size; ++read, ++write) {
-		if ((skip = check_verity_pattern(src + read)) > 0) {
-			if (patch) {
-				fprintf(stderr, "Remove pattern [%.*s]\n", skip, src + read);
-				*size -= skip;
-			} else {
-				fprintf(stderr, "Found pattern [%.*s]\n", skip, src + read);
-			}
-			read += skip;
-			found = true;
-		}
-		if (patch)
-			patched[write] = src[read];
-	}
-	if (patch) {
-		free(*buf);
-		*buf = patched;
-	}
-	return found;
+static uint32_t remove_pattern(char *src, uint32_t size, int(*pattern_skip)(const char *)) {
+    int orig_sz = size;
+    int write = 0;
+    for (int read = 0; read < orig_sz;) {
+        if (int skip = pattern_skip(src + read); skip > 0) {
+            fprintf(stderr, "Remove pattern [%.*s]\n", skip, src + read);
+            size -= skip;
+            read += skip;
+        } else {
+            src[write++] = src[read++];
+        }
+    }
+    memset(src + write, 0, orig_sz - write);
+    return size;
 }
 
-void patch_encryption(void **buf, uint32_t *size) {
-	int skip, src_size = *size;
-	char *src = (char *) *buf, *patched = (char *) xcalloc(src_size, 1);
-	for (int read = 0, write = 0; read < src_size; ++read, ++write) {
-		if ((skip = check_encryption_pattern(src + read)) > 0) {
-			fprintf(stderr, "Replace pattern [%.*s] with [encryptable]\n", skip, src + read);
-			memcpy(patched + read, "encryptable", 11);
-			read += skip;
-			write += 11;
-			*size -= (skip - 11);
-		}
-		patched[write] = src[read];
-	}
-	free(*buf);
-	*buf = patched;
+uint32_t patch_verity(void *buf, uint32_t size) {
+    return remove_pattern(static_cast<char *>(buf), size, skip_verity_pattern);
 }
 
-
+uint32_t patch_encryption(void *buf, uint32_t size) {
+    return remove_pattern(static_cast<char *>(buf), size, skip_encryption_pattern);
+}

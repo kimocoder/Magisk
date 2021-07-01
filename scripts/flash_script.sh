@@ -1,45 +1,40 @@
 #MAGISK
-##########################################################################################
-#
-# Magisk Flash Script
-# by topjohnwu
-#
-# This script will detect, construct the environment for Magisk
-# It will then call boot_patch.sh to patch the boot image
-#
-##########################################################################################
+############################################
+# Magisk Flash Script (updater-script)
+############################################
 
-##########################################################################################
+##############
 # Preparation
-##########################################################################################
-
-COMMONDIR=$INSTALLER/common
-APK=$COMMONDIR/magisk.apk
-CHROMEDIR=$INSTALLER/chromeos
+##############
 
 # Default permissions
 umask 022
 
 OUTFD=$2
-ZIP=$3
+APK="$3"
+COMMONDIR=$INSTALLER/assets
+CHROMEDIR=$INSTALLER/assets/chromeos
 
 if [ ! -f $COMMONDIR/util_functions.sh ]; then
   echo "! Unable to extract zip file!"
   exit 1
 fi
 
-# Load utility fuctions
+# Load utility functions
 . $COMMONDIR/util_functions.sh
 
 setup_flashable
 
-##########################################################################################
+############
 # Detection
-##########################################################################################
+############
 
-ui_print "************************"
-ui_print "* Magisk v$MAGISK_VER Installer"
-ui_print "************************"
+if echo $MAGISK_VER | grep -q '\.'; then
+  PRETTY_VER=$MAGISK_VER
+else
+  PRETTY_VER="$MAGISK_VER($MAGISK_VER_CODE)"
+fi
+print_title "Magisk $PRETTY_VER Installer"
 
 is_mounted /data || mount /data || is_mounted /cache || mount /cache
 mount_partitions
@@ -53,95 +48,49 @@ ui_print "- Target image: $BOOTIMAGE"
 # Detect version and architecture
 api_level_arch_detect
 
-[ $API -lt 17 ] && abort "! Magisk is only for Android 4.2 and above"
+[ $API -lt 21 ] && abort "! Magisk only support Android 5.0 and above"
 
-ui_print "- Device platform: $ARCH"
+ui_print "- Device platform: $ABI"
 
-BINDIR=$INSTALLER/$ARCH32
-chmod -R 755 $CHROMEDIR $BINDIR
+BINDIR=$INSTALLER/lib/$ABI
+cd $BINDIR
+for file in lib*.so; do mv "$file" "${file:3:${#file}-6}"; done
+cd /
+cp -af $INSTALLER/lib/$ABI32/libmagisk32.so $BINDIR/magisk32 2>/dev/null
+cp -af $CHROMEDIR/. $BINDIR/chromeos
+chmod -R 755 $BINDIR
 
 # Check if system root is installed and remove
-remove_system_su
+$BOOTMODE || remove_system_su
 
-##########################################################################################
+##############
 # Environment
-##########################################################################################
+##############
 
 ui_print "- Constructing environment"
 
 # Copy required files
 rm -rf $MAGISKBIN/* 2>/dev/null
 mkdir -p $MAGISKBIN 2>/dev/null
-cp -af $BINDIR/. $COMMONDIR/. $CHROMEDIR $BBDIR/busybox $MAGISKBIN
+cp -af $BINDIR/. $COMMONDIR/. $BBBIN $MAGISKBIN
 chmod -R 755 $MAGISKBIN
 
 # addon.d
 if [ -d /system/addon.d ]; then
   ui_print "- Adding addon.d survival script"
-  mount -o rw,remount /system
+  blockdev --setrw /dev/block/mapper/system$SLOT 2>/dev/null
+  mount -o rw,remount /system || mount -o rw,remount /
   ADDOND=/system/addon.d/99-magisk.sh
-  cat <<EOF > $ADDOND
-#!/sbin/sh
-# ADDOND_VERSION=2
-
-if [ -f /data/adb/magisk/addon.d.sh ]; then
-  exec sh /data/adb/magisk/addon.d.sh "\$@"
-else
-  OUTFD=\$(ps | grep -v 'grep' | grep -oE 'update(.*)' | cut -d" " -f3)
-  ui_print() { echo -e "ui_print \$1\nui_print" >> /proc/self/fd/\$OUTFD; }
-
-  ui_print "************************"
-  ui_print "* Magisk addon.d failed"
-  ui_print "************************"
-  ui_print "! Cannot find Magisk binaries - was data wiped or not decrypted?"
-  ui_print "! Reflash OTA from decrypted recovery or reflash Magisk"
-fi
-EOF
+  cp -af $COMMONDIR/addon.d.sh $ADDOND
   chmod 755 $ADDOND
 fi
 
-$BOOTMODE || recovery_actions
+##################
+# Image Patching
+##################
 
-##########################################################################################
-# Boot patching
-##########################################################################################
+install_magisk
 
-eval $BOOTSIGNER -verify < $BOOTIMAGE && BOOTSIGNED=true
-$BOOTSIGNED && ui_print "- Boot image is signed with AVB 1.0"
-
-SOURCEDMODE=true
-cd $MAGISKBIN
-
-$IS64BIT && mv -f magiskinit64 magiskinit || rm -f magiskinit64
-
-# Source the boot patcher
-. ./boot_patch.sh "$BOOTIMAGE"
-
-ui_print "- Flashing new boot image"
-
-if ! flash_image new-boot.img "$BOOTIMAGE"; then
-  ui_print "- Compressing ramdisk to fit in partition"
-  ./magiskboot cpio ramdisk.cpio compress
-  ./magiskboot repack "$BOOTIMAGE"
-  flash_image new-boot.img "$BOOTIMAGE" || abort "! Insufficient partition size"
-fi
-
-./magiskboot cleanup
-rm -f new-boot.img
-
-if [ -f stock_boot* ]; then
-  rm -f /data/stock_boot* 2>/dev/null
-  $DATA && mv stock_boot* /data
-fi
-
-$KEEPVERITY || patch_dtbo_image
-
-if [ -f stock_dtbo* ]; then
-  rm -f /data/stock_dtbo* 2>/dev/null
-  $DATA && mv stock_dtbo* /data
-fi
-
-cd /
 # Cleanups
 $BOOTMODE || recovery_cleanup
 rm -rf $TMPDIR

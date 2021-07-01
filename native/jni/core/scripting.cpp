@@ -1,117 +1,208 @@
-#include <unistd.h>
-#include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <vector>
+#include <sys/wait.h>
 
-#include <magisk.h>
-#include <utils.h>
-#include <selinux.h>
+#include <magisk.hpp>
+#include <utils.hpp>
+#include <selinux.hpp>
+
+#include "core.hpp"
 
 using namespace std;
 
-static void set_path() {
-	char buf[4096];
-	sprintf(buf, BBPATH ":%s", getenv("PATH"));
-	setenv("PATH", buf, 1);
+#define BBEXEC_CMD bbpath(), "sh"
+
+static const char *bbpath() {
+    static string path;
+    if (path.empty())
+        path = MAGISKTMP + "/" BBPATH "/busybox";
+    return path.data();
 }
+
+static void set_script_env() {
+    setenv("ASH_STANDALONE", "1", 1);
+    char new_path[4096];
+    sprintf(new_path, "%s:%s", getenv("PATH"), MAGISKTMP.data());
+    setenv("PATH", new_path, 1);
+};
 
 void exec_script(const char *script) {
-	exec_t exec {
-		.pre_exec = set_path,
-		.fork = fork_no_zombie
-	};
-	exec_command_sync(exec, "/system/bin/sh", script);
+    exec_t exec {
+        .pre_exec = set_script_env,
+        .fork = fork_no_orphan
+    };
+    exec_command_sync(exec, BBEXEC_CMD, script);
 }
 
-void exec_common_script(const char *stage) {
-	char path[4096];
-	DIR *dir;
-	struct dirent *entry;
-	sprintf(path, SECURE_DIR "/%s.d", stage);
-	if (!(dir = xopendir(path)))
-		return;
-	chdir(path);
+static timespec pfs_timeout;
 
-	bool pfs = strcmp(stage, "post-fs-data") == 0;
-	while ((entry = xreaddir(dir))) {
-		if (entry->d_type == DT_REG) {
-			if (access(entry->d_name, X_OK) == -1)
-				continue;
-			LOGI("%s.d: exec [%s]\n", stage, entry->d_name);
-			exec_t exec {
-				.pre_exec = set_path,
-				.fork = pfs ? fork_no_zombie : fork_dont_care
-			};
-			if (pfs)
-				exec_command_sync(exec, "/system/bin/sh", entry->d_name);
-			else
-				exec_command(exec, "/system/bin/sh", entry->d_name);
-		}
-	}
-
-	closedir(dir);
-	chdir("/");
+#define PFS_SETUP() \
+if (pfs) { \
+    if (int pid = xfork()) { \
+        if (pid < 0) \
+            return; \
+        /* In parent process, simply wait for child to finish */ \
+        waitpid(pid, nullptr, 0); \
+        return; \
+    } \
+    timer_pid = xfork(); \
+    if (timer_pid == 0) { \
+        /* In timer process, count down */ \
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &pfs_timeout, nullptr); \
+        exit(0); \
+    } \
 }
 
-void exec_module_script(const char *stage, const vector<string> &module_list) {
-	char path[4096];
-	bool pfs = strcmp(stage, "post-fs-data") == 0;
-	for (auto &m : module_list) {
-		const char* module = m.c_str();
-		sprintf(path, MODULEROOT "/%s/%s.sh", module, stage);
-		if (access(path, F_OK) == -1)
-			continue;
-		LOGI("%s: exec [%s.sh]\n", module, stage);
-		exec_t exec {
-			.pre_exec = set_path,
-			.fork = pfs ? fork_no_zombie : fork_dont_care
-		};
-		if (pfs)
-			exec_command_sync(exec, "/system/bin/sh", path);
-		else
-			exec_command(exec, "/system/bin/sh", path);
-	}
+#define PFS_WAIT() \
+if (pfs) { \
+    /* If we ran out of time, don't block */ \
+    if (timer_pid < 0) \
+        continue; \
+    if (int pid = waitpid(-1, nullptr, 0); pid == timer_pid) { \
+        LOGW("* post-fs-data scripts blocking phase timeout\n"); \
+        timer_pid = -1; \
+    } \
 }
 
-static const char migrate_script[] =
-"IMG=%s;"
-"MNT=/dev/img_mnt;"
-"e2fsck -yf $IMG;"
-"mkdir -p $MNT;"
-"for num in 0 1 2 3 4 5 6 7; do"
-"  losetup /dev/block/loop${num} $IMG || continue;"
-"  mount -t ext4 /dev/block/loop${num} $MNT;"
-"  rm -rf $MNT/lost+found $MNT/.core;"
-"  magisk --clone $MNT " MODULEROOT ";"
-"  umount $MNT;"
-"  rm -rf $MNT;"
-"  losetup -d /dev/block/loop${num};"
-"  break;"
-"done;"
-"rm -rf $IMG;";
-
-void migrate_img(const char *img) {
-	LOGI("* Migrating %s\n", img);
-	exec_t exec { .pre_exec = set_path };
-	char cmds[sizeof(migrate_script) + 128];
-	sprintf(cmds, migrate_script, img);
-	exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
+#define PFS_DONE() \
+if (pfs) { \
+    if (timer_pid > 0) \
+        kill(timer_pid, SIGKILL); \
+    exit(0); \
 }
 
-static const char install_script[] =
-"APK=%s;"
-"log -t Magisk \"apk_install: $APK\";"
-"log -t Magisk \"apk_install: `pm install -r $APK 2>&1`\";"
-"rm -f $APK;";
+void exec_common_scripts(const char *stage) {
+    LOGI("* Running %s.d scripts\n", stage);
+    char path[4096];
+    char *name = path + sprintf(path, SECURE_DIR "/%s.d", stage);
+    auto dir = xopen_dir(path);
+    if (!dir) return;
+
+    bool pfs = stage == "post-fs-data"sv;
+    int timer_pid = -1;
+    if (pfs) {
+        // Setup timer
+        clock_gettime(CLOCK_MONOTONIC, &pfs_timeout);
+        pfs_timeout.tv_sec += POST_FS_DATA_SCRIPT_MAX_TIME;
+    }
+    PFS_SETUP()
+
+    *(name++) = '/';
+    int dfd = dirfd(dir.get());
+    for (dirent *entry; (entry = xreaddir(dir.get()));) {
+        if (entry->d_type == DT_REG) {
+            if (faccessat(dfd, entry->d_name, X_OK, 0) != 0)
+                continue;
+            LOGI("%s.d: exec [%s]\n", stage, entry->d_name);
+            strcpy(name, entry->d_name);
+            exec_t exec {
+                .pre_exec = set_script_env,
+                .fork = pfs ? xfork : fork_dont_care
+            };
+            exec_command(exec, BBEXEC_CMD, path);
+            PFS_WAIT()
+        }
+    }
+
+    PFS_DONE()
+}
+
+// Return if a > b
+static bool timespec_larger(timespec *a, timespec *b) {
+    if (a->tv_sec != b->tv_sec)
+        return a->tv_sec > b->tv_sec;
+    return a->tv_nsec > b->tv_nsec;
+}
+
+void exec_module_scripts(const char *stage, const vector<string> &module_list) {
+    LOGI("* Running module %s scripts\n", stage);
+    if (module_list.empty())
+        return;
+
+    bool pfs = stage == "post-fs-data"sv;
+    if (pfs) {
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        // If we had already timed out, treat it as service mode
+        if (timespec_larger(&now, &pfs_timeout))
+            pfs = false;
+    }
+    int timer_pid = -1;
+    PFS_SETUP()
+
+    char path[4096];
+    for (auto &m : module_list) {
+        const char* module = m.data();
+        sprintf(path, MODULEROOT "/%s/%s.sh", module, stage);
+        if (access(path, F_OK) == -1)
+            continue;
+        LOGI("%s: exec [%s.sh]\n", module, stage);
+        exec_t exec {
+            .pre_exec = set_script_env,
+            .fork = pfs ? xfork : fork_dont_care
+        };
+        exec_command(exec, BBEXEC_CMD, path);
+        PFS_WAIT()
+    }
+
+    PFS_DONE()
+}
+
+constexpr char install_script[] = R"EOF(
+APK=%s
+log -t Magisk "apk_install: $APK"
+log -t Magisk "apk_install: $(pm install -r $APK 2>&1)"
+rm -f $APK
+)EOF";
 
 void install_apk(const char *apk) {
-	setfilecon(apk, "u:object_r:" SEPOL_FILE_DOMAIN ":s0");
-	exec_t exec {
-		.pre_exec = set_path,
-		.fork = fork_no_zombie
-	};
-	char cmds[sizeof(install_script) + 4096];
-	sprintf(cmds, install_script, apk);
-	exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
+    setfilecon(apk, "u:object_r:" SEPOL_FILE_TYPE ":s0");
+    exec_t exec {
+        .fork = fork_no_orphan
+    };
+    char cmds[sizeof(install_script) + 4096];
+    sprintf(cmds, install_script, apk);
+    exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
+}
+
+[[noreturn]] __printflike(2, 3)
+static void abort(FILE *fp, const char *fmt, ...) {
+    va_list valist;
+    va_start(valist, fmt);
+    vfprintf(fp, fmt, valist);
+    fprintf(fp, "\n\n");
+    va_end(valist);
+    exit(1);
+}
+
+constexpr char install_module_script[] = R"EOF(
+exec $(magisk --path)/.magisk/busybox/busybox sh -c '
+. /data/adb/magisk/util_functions.sh
+install_module
+exit 0'
+)EOF";
+
+void install_module(const char *file) {
+    if (getuid() != 0)
+        abort(stderr, "Run this command with root");
+    if (access(DATABIN, F_OK) ||
+        access(DATABIN "/busybox", X_OK) ||
+        access(DATABIN "/util_functions.sh", F_OK))
+        abort(stderr, "Incomplete Magisk install");
+    if (access(file, F_OK))
+        abort(stderr, "'%s' does not exist", file);
+
+    char *zip = realpath(file, nullptr);
+    setenv("OUTFD", "1", 1);
+    setenv("ZIPFILE", zip, 1);
+    setenv("ASH_STANDALONE", "1", 1);
+    free(zip);
+
+    int fd = xopen("/dev/null", O_RDONLY);
+    xdup2(fd, STDERR_FILENO);
+    close(fd);
+
+    const char *argv[] = { "/system/bin/sh", "-c", install_module_script, nullptr };
+    execve(argv[0], (char **) argv, environ);
+    abort(stdout, "Failed to execute BusyBox shell");
 }

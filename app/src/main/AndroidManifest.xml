@@ -3,74 +3,89 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.topjohnwu.magisk">
 
-    <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <application
-        android:allowBackup="true"
-        android:name="a.e"
-        android:theme="@style/MagiskTheme"
-        android:usesCleartextTraffic="true"
+        android:name=".core.App"
+        android:extractNativeLibs="true"
+        android:icon="@drawable/ic_launcher"
+        android:multiArch="true"
         tools:ignore="UnusedAttribute,GoogleAppIndexingWarning">
 
-        <!-- Activities -->
-
+        <!-- Splash -->
         <activity
-            android:name="a.b"
-            android:configChanges="orientation|screenSize"
-            android:exported="true" />
-        <activity
-            android:name="a.c"
-            android:configChanges="orientation|screenSize"
+            android:name=".core.SplashActivity"
             android:exported="true"
             android:theme="@style/SplashTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
-        <activity
-            android:name="a.f"
-            android:configChanges="keyboardHidden|orientation|screenSize"
-            android:screenOrientation="nosensor"
-            android:theme="@style/MagiskTheme.Flashing" />
+
+        <!-- Main -->
+        <activity android:name=".ui.MainActivity" />
 
         <!-- Superuser -->
-
         <activity
-            android:name="a.m"
-            android:exported="false"
+            android:name=".ui.surequest.SuRequestActivity"
             android:directBootAware="true"
             android:excludeFromRecents="true"
-            android:theme="@style/MagiskTheme.SU" />
+            android:exported="false"
+            tools:ignore="AppLinkUrlError">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <!-- Receiver -->
-
         <receiver
-            android:name="a.h"
-            android:directBootAware="true">
+            android:name=".core.Receiver"
+            android:directBootAware="true"
+            android:exported="false">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCALE_CHANGED" />
+                <action android:name="android.intent.action.UID_REMOVED" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.PACKAGE_FULLY_REMOVED" />
 
                 <data android:scheme="package" />
             </intent-filter>
         </receiver>
 
-        <!-- Service -->
+        <!-- DownloadService -->
+        <service android:name=".core.download.DownloadService" />
 
-        <service android:name="a.j" />
+        <!-- FileProvider -->
+        <provider
+            android:name=".core.Provider"
+            android:authorities="${applicationId}.provider"
+            android:directBootAware="true"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <!-- Hardcode GMS version -->
         <meta-data
             android:name="com.google.android.gms.version"
             android:value="12451000" />
+
+        <!-- Initialize WorkManager on-demand -->
+        <provider
+            android:name="androidx.work.impl.WorkManagerInitializer"
+            android:authorities="${applicationId}.workmanager-init"
+            tools:node="remove"
+            tools:ignore="ExportedContentProvider" />
+
+        <!-- We don't invalidate Room -->
+        <service
+            android:name="androidx.room.MultiInstanceInvalidationService"
+            tools:node="remove" />
 
     </application>
 

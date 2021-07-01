@@ -4,22 +4,21 @@
 
     <data>
 
-        <variable
-            name="item"
-            type="com.topjohnwu.magisk.model.entity.recycler.SpinnerRvItem" />
+        <variable name="item" type="String" />
 
     </data>
 
-    <androidx.appcompat.widget.AppCompatTextView
-        android:id="@android:id/text1"
+    <TextView
         style="?android:attr/spinnerItemStyle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:ellipsize="marquee"
+        android:background="?colorSurfaceSurfaceVariant"
+        android:textAppearance="@style/AppearanceFoundation.Caption"
         android:gravity="center_vertical"
         android:minHeight="?attr/listPreferredItemHeightSmall"
         android:singleLine="true"
-        android:text="@{item.item}"
+        android:text="@{item}"
         android:textAlignment="inherit"
         tools:text="Forever" />
 

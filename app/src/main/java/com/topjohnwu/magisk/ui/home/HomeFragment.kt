@@ -1,109 +1,73 @@
 package com.topjohnwu.magisk.ui.home
 
-import android.app.Activity
-import com.skoumal.teanity.viewevents.ViewEvent
-import com.topjohnwu.magisk.*
-import com.topjohnwu.magisk.databinding.FragmentMagiskBinding
-import com.topjohnwu.magisk.model.events.*
-import com.topjohnwu.magisk.ui.base.MagiskActivity
-import com.topjohnwu.magisk.ui.base.MagiskFragment
-import com.topjohnwu.magisk.utils.ISafetyNetHelper
-import com.topjohnwu.magisk.view.MarkDownWindow
-import com.topjohnwu.magisk.view.dialogs.*
-import com.topjohnwu.net.Networking
+import android.os.Bundle
+import android.view.*
+import android.widget.ImageView
+import android.widget.TextView
+import com.topjohnwu.magisk.R
+import com.topjohnwu.magisk.arch.BaseUIFragment
+import com.topjohnwu.magisk.core.download.BaseDownloader
+import com.topjohnwu.magisk.databinding.FragmentHomeMd2Binding
+import com.topjohnwu.magisk.di.viewModel
+import com.topjohnwu.magisk.events.RebootEvent
 import com.topjohnwu.superuser.Shell
-import dalvik.system.DexClassLoader
-import org.koin.androidx.viewmodel.ext.android.viewModel
-import java.io.File
 
-class HomeFragment : MagiskFragment<HomeViewModel, FragmentMagiskBinding>(),
-    ISafetyNetHelper.Callback {
+class HomeFragment : BaseUIFragment<HomeViewModel, FragmentHomeMd2Binding>() {
 
-    override val layoutRes: Int = R.layout.fragment_magisk
-    override val viewModel: HomeViewModel by viewModel()
-
-    override fun onResponse(responseCode: Int) = viewModel.finishSafetyNetCheck(responseCode)
-
-    override fun onEventDispatched(event: ViewEvent) {
-        super.onEventDispatched(event)
-        when (event) {
-            is OpenLinkEvent -> openLink(event.url)
-            is ManagerInstallEvent -> installManager()
-            is MagiskInstallEvent -> installMagisk()
-            is UninstallEvent -> uninstall()
-            is ManagerChangelogEvent -> changelogManager()
-            is EnvFixEvent -> fixEnv()
-            is UpdateSafetyNetEvent -> updateSafetyNet(false)
-        }
-    }
+    override val layoutRes = R.layout.fragment_home_md2
+    override val viewModel by viewModel<HomeViewModel>()
 
     override fun onStart() {
         super.onStart()
+        activity.title = resources.getString(R.string.section_home)
         setHasOptionsMenu(true)
-        requireActivity().setTitle(R.string.magisk)
+        BaseDownloader.observeProgress(this, viewModel::onProgressUpdate)
     }
 
-    private fun installMagisk() {
-        // Show Manager update first
-        if (Config.remoteManagerVersionCode > BuildConfig.VERSION_CODE) {
-            installManager()
-            return
-        }
-
-        MagiskInstallDialog(requireActivity() as MagiskActivity<*, *>).show()
-    }
-
-    private fun installManager() = ManagerInstallDialog(requireActivity()).show()
-    private fun uninstall() = UninstallDialog(requireActivity()).show()
-    private fun fixEnv() = EnvFixDialog(requireActivity()).show()
-
-    private fun changelogManager() = MarkDownWindow
-        .show(requireActivity(), null, resources.openRawResource(R.raw.changelog))
-
-    private fun downloadSafetyNet(requiresUserInput: Boolean = true) {
-        fun download() = Networking
-            .get(Const.Url.SNET_URL)
-            .getAsFile(EXT_APK) { updateSafetyNet(true) }
-
-        if (!requiresUserInput) {
-            download()
-            return
-        }
-
-        CustomAlertDialog(requireActivity())
-            .setTitle(R.string.proprietary_title)
-            .setMessage(R.string.proprietary_notice)
-            .setCancelable(false)
-            .setPositiveButton(R.string.yes) { _, _ -> download() }
-            .setNegativeButton(R.string.no_thanks) { _, _ -> viewModel.finishSafetyNetCheck(-2) }
-            .show()
-    }
-
-    private fun updateSafetyNet(dieOnError: Boolean) {
-        try {
-            val loader = DexClassLoader(EXT_APK.path, EXT_APK.parent, null,
-                    ISafetyNetHelper::class.java.classLoader)
-            val clazz = loader.loadClass("com.topjohnwu.snet.Snet")
-            val helper = clazz.getMethod("newHelper",
-                    Class::class.java, String::class.java, Activity::class.java, Any::class.java)
-                    .invoke(null, ISafetyNetHelper::class.java, EXT_APK.path,
-                            requireActivity(), this) as ISafetyNetHelper
-            if (helper.version < Const.SNET_EXT_VER)
-                throw Exception()
-            helper.attest()
-        } catch (e: Exception) {
-            if (dieOnError) {
-                viewModel.finishSafetyNetCheck(-1)
-                return
+    private fun checkTitle(text: TextView, icon: ImageView) {
+        text.post {
+            if (text.layout.getEllipsisCount(0) != 0) {
+                with (icon) {
+                    layoutParams.width = 0
+                    layoutParams.height = 0
+                    requestLayout()
+                }
             }
-            Shell.sh("rm -rf " + EXT_APK.parent).exec()
-            EXT_APK.parentFile?.mkdir()
-            downloadSafetyNet(!dieOnError)
         }
     }
 
-    companion object {
-        val EXT_APK = File("${App.self.filesDir.parent}/snet", "snet.apk")
-    }
-}
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        super.onCreateView(inflater, container, savedInstanceState)
 
+        // If titles are squished, hide icons
+        with(binding.homeMagiskWrapper) {
+            checkTitle(homeMagiskTitle, homeMagiskIcon)
+        }
+        with(binding.homeManagerWrapper) {
+            checkTitle(homeManagerTitle, homeManagerIcon)
+        }
+
+        return binding.root
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
+        inflater.inflate(R.menu.menu_home_md2, menu)
+        if (!Shell.rootAccess())
+            menu.removeItem(R.id.action_reboot)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.action_settings ->
+                HomeFragmentDirections.actionHomeFragmentToSettingsFragment().navigate()
+            R.id.action_reboot -> RebootEvent.inflateMenu(activity).show()
+            else -> return super.onOptionsItemSelected(item)
+        }
+        return true
+    }
+
+}

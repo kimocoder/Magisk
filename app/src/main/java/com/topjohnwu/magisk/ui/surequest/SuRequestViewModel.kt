@@ -3,104 +3,93 @@ package com.topjohnwu.magisk.ui.surequest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.graphics.drawable.Drawable
-import android.hardware.fingerprint.FingerprintManager
+import android.os.Bundle
 import android.os.CountDownTimer
-import android.text.TextUtils
-import com.skoumal.teanity.databinding.ComparableRvItem
-import com.skoumal.teanity.extensions.addOnPropertyChangedCallback
-import com.skoumal.teanity.util.DiffObservableList
-import com.skoumal.teanity.util.KObservableField
-import com.topjohnwu.magisk.BuildConfig
-import com.topjohnwu.magisk.Config
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
+import android.widget.Toast
+import androidx.databinding.Bindable
+import androidx.lifecycle.viewModelScope
+import com.topjohnwu.magisk.BR
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.data.repository.AppRepository
-import com.topjohnwu.magisk.model.entity.MagiskPolicy
-import com.topjohnwu.magisk.model.entity.Policy
-import com.topjohnwu.magisk.model.entity.recycler.SpinnerRvItem
-import com.topjohnwu.magisk.model.entity.toPolicy
-import com.topjohnwu.magisk.model.events.DieEvent
-import com.topjohnwu.magisk.ui.base.MagiskViewModel
-import com.topjohnwu.magisk.utils.FingerprintHelper
-import com.topjohnwu.magisk.utils.SuConnector
-import com.topjohnwu.magisk.utils.now
-import me.tatarka.bindingcollectionadapter2.BindingListViewAdapter
+import com.topjohnwu.magisk.arch.BaseViewModel
+import com.topjohnwu.magisk.core.Config
+import com.topjohnwu.magisk.core.magiskdb.PolicyDao
+import com.topjohnwu.magisk.core.model.su.SuPolicy
+import com.topjohnwu.magisk.core.model.su.SuPolicy.Companion.ALLOW
+import com.topjohnwu.magisk.core.model.su.SuPolicy.Companion.DENY
+import com.topjohnwu.magisk.core.su.SuRequestHandler
+import com.topjohnwu.magisk.core.utils.BiometricHelper
+import com.topjohnwu.magisk.di.AppContext
+import com.topjohnwu.magisk.events.DieEvent
+import com.topjohnwu.magisk.events.ShowUIEvent
+import com.topjohnwu.magisk.events.dialog.BiometricEvent
+import com.topjohnwu.magisk.utils.TextHolder
+import com.topjohnwu.magisk.utils.Utils
+import com.topjohnwu.magisk.utils.set
+import kotlinx.coroutines.launch
 import me.tatarka.bindingcollectionadapter2.ItemBinding
-import timber.log.Timber
-import java.io.IOException
-import java.util.concurrent.TimeUnit.*
+import java.util.concurrent.TimeUnit.SECONDS
 
 class SuRequestViewModel(
-    private val packageManager: PackageManager,
-    private val appRepo: AppRepository,
-    private val timeoutPrefs: SharedPreferences,
-    private val resources: Resources
-) : MagiskViewModel() {
+    policyDB: PolicyDao,
+    private val timeoutPrefs: SharedPreferences
+) : BaseViewModel() {
 
-    val icon = KObservableField<Drawable?>(null)
-    val title = KObservableField("")
-    val packageName = KObservableField("")
+    lateinit var icon: Drawable
+    lateinit var title: String
+    lateinit var packageName: String
 
-    val denyText = KObservableField(resources.getString(R.string.deny))
-    val warningText = KObservableField<CharSequence>(resources.getString(R.string.su_warning))
+    @get:Bindable
+    val denyText = DenyText()
 
-    val canUseFingerprint = KObservableField(FingerprintHelper.useFingerprint())
-    val selectedItemPosition = KObservableField(0)
+    @get:Bindable
+    var selectedItemPosition = 0
+        set(value) = set(value, field, { field = it }, BR.selectedItemPosition)
 
-    private val items = DiffObservableList(ComparableRvItem.callback)
-    private val itemBinding = ItemBinding.of<ComparableRvItem<*>> { binding, _, item ->
-        item.bind(binding)
-    }
+    @get:Bindable
+    var grantEnabled = false
+        set(value) = set(value, field, { field = it }, BR.grantEnabled)
 
-    val adapter = BindingListViewAdapter<ComparableRvItem<*>>(1).apply {
-        itemBinding = this@SuRequestViewModel.itemBinding
-        setItems(items)
-    }
-
-
-    var handler: ActionHandler? = null
-    private var timer: CountDownTimer? = null
-    private var policy: MagiskPolicy? = null
-        set(value) {
-            field = value
-            updatePolicy(value)
+    @SuppressLint("ClickableViewAccessibility")
+    val grantTouchListener = View.OnTouchListener { _: View, event: MotionEvent ->
+        // Filter obscured touches by consuming them.
+        if (event.flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED != 0
+            || event.flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0) {
+            if (event.action == MotionEvent.ACTION_UP) {
+                Utils.toast(R.string.touch_filtered_warning, Toast.LENGTH_SHORT)
+            }
+            return@OnTouchListener Config.suTapjack
         }
-
-    init {
-        resources.getStringArray(R.array.allow_timeout)
-            .map { SpinnerRvItem(it) }
-            .let { items.update(it) }
-
-        selectedItemPosition.addOnPropertyChangedCallback {
-            Timber.e("Changed position to $it")
-        }
+        false
     }
 
-    private fun updatePolicy(policy: MagiskPolicy?) {
-        policy ?: return
+    val itemBinding = ItemBinding.of<String>(BR.item, R.layout.item_spinner)
 
-        icon.value = policy.applicationInfo.loadIcon(packageManager)
-        title.value = policy.appName
-        packageName.value = policy.packageName
-
-        selectedItemPosition.value = timeoutPrefs.getInt(policy.packageName, 0)
-    }
-
-    private fun cancelTimer() {
-        timer?.cancel()
-        denyText.value = resources.getString(R.string.deny)
-    }
+    private val handler = SuRequestHandler(AppContext.packageManager, policyDB)
+    private lateinit var timer: CountDownTimer
 
     fun grantPressed() {
-        handler?.handleAction(Policy.ALLOW)
-        timer?.cancel()
+        cancelTimer()
+        if (BiometricHelper.isEnabled) {
+            BiometricEvent {
+                onSuccess {
+                    respond(ALLOW)
+                }
+            }.publish()
+        } else {
+            respond(ALLOW)
+        }
     }
 
     fun denyPressed() {
-        handler?.handleAction(Policy.DENY)
-        timer?.cancel()
+        respond(DENY)
     }
 
     fun spinnerTouched(): Boolean {
@@ -108,159 +97,87 @@ class SuRequestViewModel(
         return false
     }
 
-    fun handleRequest(intent: Intent): Boolean {
-        val socketName = intent.getStringExtra("socket") ?: return false
-
-        val connector: SuConnector
-        try {
-            connector = object : SuConnector(socketName) {
-                @Throws(IOException::class)
-                override fun onResponse() {
-                    out.writeInt(policy?.policy ?: return)
-                }
-            }
-            val bundle = connector.readSocketInput()
-            val uid = bundle.getString("uid")?.toIntOrNull() ?: return false
-            appRepo.deleteOutdated().blockingGet() // wrong!
-            policy = runCatching { appRepo.fetch(uid).blockingGet() }
-                .getOrDefault(uid.toPolicy(packageManager))
-        } catch (e: IOException) {
-            e.printStackTrace()
-            return false
-        } catch (e: PackageManager.NameNotFoundException) {
-            e.printStackTrace()
-            return false
-        }
-
-        handler = object : ActionHandler() {
-            override fun handleAction() {
-                connector.response()
-                done()
-            }
-
-            @SuppressLint("ApplySharedPref")
-            override fun handleAction(action: Int) {
-                val pos = selectedItemPosition.value
-                timeoutPrefs.edit().putInt(policy?.packageName, pos).commit()
-                handleAction(action, Config.Value.TIMEOUT_LIST[pos])
-            }
-
-            override fun handleAction(action: Int, time: Int) {
-                val until = if (time >= 0) {
-                    if (time == 0) {
-                        0
-                    } else {
-                        MILLISECONDS.toSeconds(now) + MINUTES.toSeconds(time.toLong())
-                    }
-                } else {
-                    policy?.until ?: 0
-                }
-                policy = policy?.copy(policy = action, until = until)?.apply {
-                    appRepo.update(this).blockingGet()
-                }
-
-                handleAction()
-            }
-        }
-
-        // Never allow com.topjohnwu.magisk (could be malware)
-        if (TextUtils.equals(policy?.packageName, BuildConfig.APPLICATION_ID))
-            return false
-
-        // If not interactive, response directly
-        if (policy?.policy != Policy.INTERACTIVE) {
-            handler?.handleAction()
-            return true
-        }
-
-        when (Config.get<Int>(Config.Key.SU_AUTO_RESPONSE)) {
-            Config.Value.SU_AUTO_DENY -> {
-                handler?.handleAction(Policy.DENY, 0)
-                return true
-            }
-            Config.Value.SU_AUTO_ALLOW -> {
-                handler?.handleAction(Policy.ALLOW, 0)
-                return true
-            }
-        }
-
-        showUI()
-        return true
-    }
-
-    @SuppressLint("ClickableViewAccessibility")
-    private fun showUI() {
-        val seconds = Config.get<Int>(Config.Key.SU_REQUEST_TIMEOUT).toLong()
-        val millis = SECONDS.toMillis(seconds)
-        timer = object : CountDownTimer(millis, 1000) {
-            override fun onTick(remains: Long) {
-                denyText.value = "%s (%d)"
-                    .format(resources.getString(R.string.deny), remains / 1000)
-            }
-
-            override fun onFinish() {
-                denyText.value = resources.getString(R.string.deny)
-                handler?.handleAction(Policy.DENY)
-            }
-        }
-        timer?.start()
-        handler?.addCancel(Runnable { cancelTimer() })
-
-        val useFP = canUseFingerprint.value
-
-        if (useFP)
-            try {
-                val helper = SuFingerprint()
-                helper.authenticate()
-                handler?.addCancel(Runnable { helper.cancel() })
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-    }
-
-    private inner class SuFingerprint @Throws(Exception::class)
-    internal constructor() : FingerprintHelper() {
-
-        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-            warningText.value = errString
-        }
-
-        override fun onAuthenticationHelp(helpCode: Int, helpString: CharSequence) {
-            warningText.value = helpString
-        }
-
-        override fun onAuthenticationSucceeded(result: FingerprintManager.AuthenticationResult) {
-            handler?.handleAction(Policy.ALLOW)
-        }
-
-        override fun onAuthenticationFailed() {
-            warningText.value = resources.getString(R.string.auth_fail)
+    fun handleRequest(intent: Intent) {
+        viewModelScope.launch {
+            if (handler.start(intent))
+                showDialog(handler.policy)
+            else
+                DieEvent().publish()
         }
     }
 
-    open inner class ActionHandler {
-        private val cancelTasks = mutableListOf<Runnable>()
+    private fun showDialog(policy: SuPolicy) {
+        icon = policy.icon
+        title = policy.appName
+        packageName = policy.packageName
+        selectedItemPosition = timeoutPrefs.getInt(policy.packageName, 0)
 
-        internal open fun handleAction() {
-            done()
+        // Set timer
+        val millis = SECONDS.toMillis(Config.suDefaultTimeout.toLong())
+        timer = SuTimer(millis, 1000).apply { start() }
+
+        // Actually show the UI
+        ShowUIEvent(if (Config.suTapjack) EmptyAccessibilityDelegate else null).publish()
+    }
+
+    private fun respond(action: Int) {
+        timer.cancel()
+
+        val pos = selectedItemPosition
+        timeoutPrefs.edit().putInt(handler.policy.packageName, pos).apply()
+        handler.respond(action, Config.Value.TIMEOUT_LIST[pos])
+
+        // Kill activity after response
+        DieEvent().publish()
+    }
+
+    private fun cancelTimer() {
+        timer.cancel()
+        denyText.seconds = 0
+    }
+
+    private inner class SuTimer(
+        private val millis: Long,
+        interval: Long
+    ) : CountDownTimer(millis, interval) {
+
+        override fun onTick(remains: Long) {
+            if (!grantEnabled && remains <= millis - 1000) {
+                grantEnabled = true
+            }
+            denyText.seconds = (remains / 1000).toInt() + 1
         }
 
-        internal open fun handleAction(action: Int) {
-            done()
+        override fun onFinish() {
+            denyText.seconds = 0
+            respond(DENY)
         }
 
-        internal open fun handleAction(action: Int, time: Int) {
-            done()
-        }
+    }
 
-        internal fun addCancel(r: Runnable) {
-            cancelTasks.add(r)
-        }
+    inner class DenyText : TextHolder() {
+        var seconds = 0
+            set(value) = set(value, field, { field = it }, BR.denyText)
 
-        internal fun done() {
-            cancelTasks.forEach { it.run() }
-            DieEvent().publish()
+        override fun getText(resources: Resources): CharSequence {
+            return if (seconds != 0)
+                "${resources.getString(R.string.deny)} ($seconds)"
+            else
+                resources.getString(R.string.deny)
         }
     }
 
+    // Invisible for accessibility services
+    object EmptyAccessibilityDelegate : View.AccessibilityDelegate() {
+        override fun sendAccessibilityEvent(host: View?, eventType: Int) {}
+        override fun performAccessibilityAction(host: View?, action: Int, args: Bundle?) = true
+        override fun sendAccessibilityEventUnchecked(host: View?, event: AccessibilityEvent?) {}
+        override fun dispatchPopulateAccessibilityEvent(host: View?, event: AccessibilityEvent?) = true
+        override fun onPopulateAccessibilityEvent(host: View?, event: AccessibilityEvent?) {}
+        override fun onInitializeAccessibilityEvent(host: View?, event: AccessibilityEvent?) {}
+        override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {}
+        override fun addExtraDataToAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo, extraDataKey: String, arguments: Bundle?) {}
+        override fun onRequestSendAccessibilityEvent(host: ViewGroup?, child: View?, event: AccessibilityEvent?): Boolean = false
+        override fun getAccessibilityNodeProvider(host: View?): AccessibilityNodeProvider? = null
+    }
 }

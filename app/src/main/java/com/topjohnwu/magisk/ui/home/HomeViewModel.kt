@@ -1,229 +1,155 @@
 package com.topjohnwu.magisk.ui.home
 
-import com.skoumal.teanity.extensions.addOnPropertyChangedCallback
-import com.skoumal.teanity.extensions.doOnSubscribeUi
-import com.skoumal.teanity.extensions.subscribeK
-import com.skoumal.teanity.util.KObservableField
+import androidx.databinding.Bindable
+import androidx.lifecycle.viewModelScope
 import com.topjohnwu.magisk.BuildConfig
-import com.topjohnwu.magisk.Config
-import com.topjohnwu.magisk.Const
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.data.repository.MagiskRepository
-import com.topjohnwu.magisk.model.events.*
-import com.topjohnwu.magisk.model.observer.Observer
-import com.topjohnwu.magisk.ui.base.MagiskViewModel
-import com.topjohnwu.magisk.utils.ISafetyNetHelper
-import com.topjohnwu.magisk.utils.packageName
-import com.topjohnwu.magisk.utils.res
-import com.topjohnwu.magisk.utils.toggle
+import com.topjohnwu.magisk.arch.*
+import com.topjohnwu.magisk.core.Config
+import com.topjohnwu.magisk.core.Info
+import com.topjohnwu.magisk.core.download.Subject
+import com.topjohnwu.magisk.core.download.Subject.Manager
+import com.topjohnwu.magisk.data.repository.NetworkService
+import com.topjohnwu.magisk.events.OpenInappLinkEvent
+import com.topjohnwu.magisk.events.SnackbarEvent
+import com.topjohnwu.magisk.events.dialog.EnvFixDialog
+import com.topjohnwu.magisk.events.dialog.ManagerInstallDialog
+import com.topjohnwu.magisk.events.dialog.UninstallDialog
+import com.topjohnwu.magisk.ktx.await
+import com.topjohnwu.magisk.utils.asText
+import com.topjohnwu.magisk.utils.set
 import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.launch
+import me.tatarka.bindingcollectionadapter2.BR
+import kotlin.math.roundToInt
 
+enum class MagiskState {
+    NOT_INSTALLED, UP_TO_DATE, OBSOLETE, LOADING
+}
 
 class HomeViewModel(
-    private val magiskRepo: MagiskRepository
-) : MagiskViewModel() {
+    private val svc: NetworkService
+) : BaseViewModel() {
 
-    val isAdvancedExpanded = KObservableField(false)
+    val magiskTitleBarrierIds =
+        intArrayOf(R.id.home_magisk_icon, R.id.home_magisk_title, R.id.home_magisk_button)
+    val magiskDetailBarrierIds =
+        intArrayOf(R.id.home_magisk_installed_version, R.id.home_device_details_ramdisk)
+    val appTitleBarrierIds =
+        intArrayOf(R.id.home_manager_icon, R.id.home_manager_title, R.id.home_manager_button)
 
-    val isForceEncryption = KObservableField(Config.keepEnc)
-    val isKeepVerity = KObservableField(Config.keepVerity)
+    @get:Bindable
+    var isNoticeVisible = Config.safetyNotice
+        set(value) = set(value, field, { field = it }, BR.noticeVisible)
 
-    val magiskState = KObservableField(MagiskState.LOADING)
-    val magiskStateText = Observer(magiskState) {
-        when (magiskState.value) {
-            MagiskState.NO_ROOT -> TODO()
-            MagiskState.NOT_INSTALLED -> R.string.magisk_version_error.res()
-            MagiskState.UP_TO_DATE -> R.string.magisk_up_to_date.res()
-            MagiskState.LOADING -> R.string.checking_for_updates.res()
-            MagiskState.OBSOLETE -> R.string.magisk_update_title.res()
-        }
+    val stateMagisk = when {
+        !Info.env.isActive -> MagiskState.NOT_INSTALLED
+        Info.env.magiskVersionCode < BuildConfig.VERSION_CODE -> MagiskState.OBSOLETE
+        else -> MagiskState.UP_TO_DATE
     }
-    val magiskCurrentVersion = KObservableField("")
-    val magiskLatestVersion = KObservableField("")
-    val magiskAdditionalInfo = Observer(magiskState) {
-        if (Config.get<Boolean>(Config.Key.COREONLY))
-            R.string.core_only_enabled.res()
+
+    @get:Bindable
+    var stateManager = MagiskState.LOADING
+        set(value) = set(value, field, { field = it }, BR.stateManager)
+
+    val magiskInstalledVersion get() = Info.env.run {
+        if (isActive)
+            "$magiskVersionString ($magiskVersionCode)".asText()
         else
-            ""
+            R.string.not_available.asText()
     }
 
-    val managerState = KObservableField(MagiskState.LOADING)
-    val managerStateText = Observer(managerState) {
-        when (managerState.value) {
-            MagiskState.NO_ROOT -> "wtf"
-            MagiskState.NOT_INSTALLED -> R.string.invalid_update_channel.res()
-            MagiskState.UP_TO_DATE -> R.string.manager_up_to_date.res()
-            MagiskState.LOADING -> R.string.checking_for_updates.res()
-            MagiskState.OBSOLETE -> R.string.manager_update_title.res()
-        }
-    }
-    val managerCurrentVersion = KObservableField("")
-    val managerLatestVersion = KObservableField("")
-    val managerAdditionalInfo = Observer(managerState) {
-        if (packageName != BuildConfig.APPLICATION_ID)
-            "($packageName)"
-        else
-            ""
-    }
+    @get:Bindable
+    var managerRemoteVersion = R.string.loading.asText()
+        set(value) = set(value, field, { field = it }, BR.managerRemoteVersion)
 
-    val safetyNetTitle = KObservableField(R.string.safetyNet_check_text)
-    val ctsState = KObservableField(SafetyNetState.IDLE)
-    val basicIntegrityState = KObservableField(SafetyNetState.IDLE)
-    val safetyNetState = Observer(ctsState, basicIntegrityState) {
-        val cts = ctsState.value
-        val basic = basicIntegrityState.value
-        val states = listOf(cts, basic)
+    val managerInstalledVersion = Info.stub?.let {
+        "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) (${it.version})"
+    } ?: "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
 
-        when {
-            states.any { it == SafetyNetState.LOADING } -> State.LOADING
-            states.any { it == SafetyNetState.IDLE } -> State.LOADING
-            else -> State.LOADED
-        }
+    @get:Bindable
+    var stateManagerProgress = 0
+        set(value) = set(value, field, { field = it }, BR.stateManagerProgress)
+
+    @get:Bindable
+    val showSafetyNet get() = Info.hasGMS && isConnected.get()
+
+    val itemBinding = itemBindingOf<IconLink> {
+        it.bindExtra(BR.viewModel, this)
     }
-
-    val hasRoot = KObservableField(false)
 
     private var shownDialog = false
 
-    init {
-        isForceEncryption.addOnPropertyChangedCallback {
-            Config.keepEnc = it ?: return@addOnPropertyChangedCallback
-        }
-        isKeepVerity.addOnPropertyChangedCallback {
-            Config.keepVerity = it ?: return@addOnPropertyChangedCallback
-        }
+    override fun refresh() = viewModelScope.launch {
+        state = State.LOADING
+        notifyPropertyChanged(BR.showSafetyNet)
+        Info.getRemote(svc)?.apply {
+            state = State.LOADED
 
-        refresh()
-    }
-
-    fun paypalPressed() = OpenLinkEvent(Const.Url.PAYPAL_URL).publish()
-    fun patreonPressed() = OpenLinkEvent(Const.Url.PATREON_URL).publish()
-    fun twitterPressed() = OpenLinkEvent(Const.Url.TWITTER_URL).publish()
-    fun githubPressed() = OpenLinkEvent(Const.Url.SOURCE_CODE_URL).publish()
-    fun xdaPressed() = OpenLinkEvent(Const.Url.XDA_THREAD).publish()
-    fun uninstallPressed() = UninstallEvent().publish()
-
-    fun advancedPressed() = isAdvancedExpanded.toggle()
-
-    fun installPressed(item: MagiskItem) = when (item) {
-        MagiskItem.MANAGER -> ManagerInstallEvent().publish()
-        MagiskItem.MAGISK -> MagiskInstallEvent().publish()
-    }
-
-    fun cardPressed(item: MagiskItem) = when (item) {
-        MagiskItem.MANAGER -> ManagerChangelogEvent().publish()
-        MagiskItem.MAGISK -> MagiskChangelogEvent().publish()
-    }
-
-    fun safetyNetPressed() {
-        ctsState.value = SafetyNetState.LOADING
-        basicIntegrityState.value = SafetyNetState.LOADING
-        safetyNetTitle.value = R.string.checking_safetyNet_status
-
-        UpdateSafetyNetEvent().publish()
-    }
-
-    fun finishSafetyNetCheck(response: Int) = when {
-        response and 0x0F == 0 -> {
-            val hasCtsPassed = response and ISafetyNetHelper.CTS_PASS != 0
-            val hasBasicIntegrityPassed = response and ISafetyNetHelper.BASIC_PASS != 0
-            safetyNetTitle.value = R.string.safetyNet_check_success
-            ctsState.value = if (hasCtsPassed) {
-                SafetyNetState.PASS
-            } else {
-                SafetyNetState.FAILED
+            stateManager = when {
+                BuildConfig.VERSION_CODE < magisk.versionCode -> MagiskState.OBSOLETE
+                else -> MagiskState.UP_TO_DATE
             }
-            basicIntegrityState.value = if (hasBasicIntegrityPassed) {
-                SafetyNetState.PASS
-            } else {
-                SafetyNetState.FAILED
-            }
-        }
-        response == -2 -> {
-            ctsState.value = SafetyNetState.IDLE
-            basicIntegrityState.value = SafetyNetState.IDLE
-        }
-        else -> {
-            ctsState.value = SafetyNetState.IDLE
-            basicIntegrityState.value = SafetyNetState.IDLE
-            safetyNetTitle.value = when (response) {
-                ISafetyNetHelper.RESPONSE_ERR -> R.string.safetyNet_res_invalid
-                else -> R.string.safetyNet_api_error
-            }
-        }
-    }
 
-    fun refresh() {
-        magiskRepo.fetchConfig()
-            .applyViewModel(this)
-            .doOnSubscribeUi {
-                magiskState.value = MagiskState.LOADING
-                managerState.value = MagiskState.LOADING
-                ctsState.value = SafetyNetState.IDLE
-                basicIntegrityState.value = SafetyNetState.IDLE
-                safetyNetTitle.value = R.string.safetyNet_check_text
-            }
-            .subscribeK {
-                it.app.let {
-                    Config.remoteManagerVersionCode = it.versionCode.toIntOrNull() ?: -1
-                    Config.remoteManagerVersionString = it.version
-                }
-                it.magisk.let {
-                    Config.remoteMagiskVersionCode = it.versionCode.toIntOrNull() ?: -1
-                    Config.remoteMagiskVersionString = it.version
-                }
-                updateSelf()
+            managerRemoteVersion =
+                "${magisk.version} (${magisk.versionCode}) (${stub.versionCode})".asText()
+
+            launch {
                 ensureEnv()
             }
-
-        hasRoot.value = Shell.rootAccess()
+        } ?: {
+            state = State.LOADING_FAILED
+            managerRemoteVersion = R.string.not_available.asText()
+        }()
     }
 
-    private fun updateSelf() {
-        state = State.LOADED
-        magiskState.value = when (Config.magiskVersionCode) {
-            in Int.MIN_VALUE until 0 -> MagiskState.NOT_INSTALLED
-            !in Config.remoteMagiskVersionCode..Int.MAX_VALUE -> MagiskState.OBSOLETE
-            else -> MagiskState.UP_TO_DATE
+    val showTest = false
+
+    fun onTestPressed() = object : ViewEvent(), ActivityExecutor {
+        override fun invoke(activity: BaseUIActivity<*, *>) {
+            /* Entry point to trigger test events within the app */
         }
+    }.publish()
 
-        magiskCurrentVersion.value = if (magiskState.value != MagiskState.NOT_INSTALLED) {
-            version.format(Config.magiskVersionString, Config.magiskVersionCode)
-        } else {
-            ""
-        }
-
-        magiskLatestVersion.value = version
-            .format(Config.remoteMagiskVersionString, Config.remoteMagiskVersionCode)
-
-        managerState.value = when (Config.remoteManagerVersionCode) {
-            in Int.MIN_VALUE until 0 -> MagiskState.NOT_INSTALLED //wrong update channel
-            in (BuildConfig.VERSION_CODE + 1)..Int.MAX_VALUE -> MagiskState.OBSOLETE
-            else -> MagiskState.UP_TO_DATE
-        }
-
-        managerCurrentVersion.value = version
-            .format(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
-
-        managerLatestVersion.value = version
-            .format(Config.remoteManagerVersionString, Config.remoteManagerVersionCode)
+    fun onProgressUpdate(progress: Float, subject: Subject) {
+        if (subject is Manager)
+            stateManagerProgress = progress.times(100f).roundToInt()
     }
 
-    private fun ensureEnv() {
-        val invalidStates =
-            listOf(MagiskState.NOT_INSTALLED, MagiskState.NO_ROOT, MagiskState.LOADING)
+    fun onLinkPressed(link: String) = OpenInappLinkEvent(link).publish()
 
-        // Don't bother checking env when magisk is not installed, loading or already has been shown
-        if (invalidStates.any { it == magiskState.value } || shownDialog) return
+    fun onDeletePressed() = UninstallDialog().publish()
 
-        if (!Shell.su("env_check").exec().isSuccess) {
+    fun onManagerPressed() = when (state) {
+        State.LOADED -> withExternalRW { ManagerInstallDialog().publish() }
+        State.LOADING -> SnackbarEvent(R.string.loading).publish()
+        else -> SnackbarEvent(R.string.no_connection).publish()
+    }
+
+    fun onMagiskPressed() = withExternalRW {
+        HomeFragmentDirections.actionHomeFragmentToInstallFragment().navigate()
+    }
+
+    fun onSafetyNetPressed() =
+        HomeFragmentDirections.actionHomeFragmentToSafetynetFragment().navigate()
+
+    fun hideNotice() {
+        Config.safetyNotice = false
+        isNoticeVisible = false
+    }
+
+    private suspend fun ensureEnv() {
+        val invalidStates = listOf(
+            MagiskState.NOT_INSTALLED,
+            MagiskState.LOADING
+        )
+        if (invalidStates.any { it == stateMagisk } || shownDialog) return
+
+        val result = Shell.su("env_check").await()
+        if (!result.isSuccess) {
             shownDialog = true
-            EnvFixEvent().publish()
+            EnvFixDialog().publish()
         }
-    }
-
-    companion object {
-        private const val version = "%s (%d)"
     }
 
 }
