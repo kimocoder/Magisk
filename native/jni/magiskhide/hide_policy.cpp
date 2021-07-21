@@ -81,6 +81,7 @@ void hide_daemon(int pid) {
     if (fork_dont_care() == 0) {
         hide_unmount(pid);
         // Send resume signal
+        LOGD("hide: Resume pid %d", pid);
         kill(pid, SIGCONT);
         _exit(0);
     }
