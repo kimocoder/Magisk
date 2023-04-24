@@ -290,9 +290,11 @@ def build_binary(args):
     flags = op.join('native', 'jni', 'include', 'flags.hpp')
     flags_stat = os.stat(flags)
 
-    if op.exists(args.config):
-        if os.stat(args.config).st_mtime_ns > flags_stat.st_mtime_ns:
-            update_flags = True
+    if (
+        op.exists(args.config)
+        and os.stat(args.config).st_mtime_ns > flags_stat.st_mtime_ns
+    ):
+        update_flags = True
 
     if os.stat('gradle.properties').st_mtime_ns > flags_stat.st_mtime_ns:
         update_flags = True
@@ -340,8 +342,13 @@ def build_binary(args):
 def build_apk(args, module):
     build_type = 'Release' if args.release or module == 'stub' else 'Debug'
 
-    proc = execv([gradlew, f'{module}:assemble{build_type}',
-                  '-PconfigPath=' + op.abspath(args.config)])
+    proc = execv(
+        [
+            gradlew,
+            f'{module}:assemble{build_type}',
+            f'-PconfigPath={op.abspath(args.config)}',
+        ]
+    )
     if proc.returncode != 0:
         error(f'Build {module} failed!')
 
@@ -351,7 +358,7 @@ def build_apk(args, module):
     source = op.join(module, 'build', 'outputs', 'apk', build_type, apk)
     target = op.join(config['outdir'], apk)
     mv(source, target)
-    header('Output: ' + target)
+    header(f'Output: {target}')
 
 
 def build_app(args):
@@ -379,7 +386,7 @@ def build_snet(args):
         with zipfile.ZipFile(source) as zin:
             zout.writestr('classes.dex', zin.read('classes.dex'))
     rm(source)
-    header('Output: ' + target)
+    header(f'Output: {target}')
 
 
 def cleanup(args):
